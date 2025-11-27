@@ -1164,108 +1164,116 @@ if st.session_state["calc_df"] is not None:
         resolve_base_price
     )
 
-    # ---------- Volume-based price breaks (global, by SQM per annum) ----------
-    st.markdown("**Volume-based price breaks (by SQM per annum, global)**")
-    st.caption(
-        "Configure SQM tiers and % adjustments vs the BASE group price. "
-        "Each group can opt in/out. Example: "
-        "Tier1 up to 250sqm = 0%, Tier2 up to 500sqm = -1%, Tier3 up to 1000sqm = -2%. "
-        "Any volume above the highest tier uses the last tier's %."
+# ---------- Volume-based price breaks (global, by SQM per annum) ----------
+st.markdown("**Volume-based price breaks (by SQM per annum, global)**")
+st.caption(
+    "Configure SQM tiers and % adjustments vs the BASE group price. "
+    "Each group can opt in/out. Example: "
+    "Tier1 up to 250sqm = 0%, Tier2 up to 500sqm = -1%, Tier3 up to 1000sqm = -2%. "
+    "Any volume above the highest tier uses the last tier's %."
+)
+
+# Let user choose how many tiers (ranges)
+tier_count = st.number_input(
+    "Number of SQM tiers (ranges)",
+    min_value=1,
+    max_value=10,
+    step=1,
+    value=st.session_state["tier_count"],
+    key="tier_count_input",
+    help="This controls how many SQM ranges you want (e.g. 3 = up to 250, 500, 1000).",
+)
+st.session_state["tier_count"] = int(tier_count)
+
+# Make sure stored lists match tier_count length
+while len(st.session_state["tier_thresholds"]) < tier_count:
+    last_thr = st.session_state["tier_thresholds"][-1] if st.session_state["tier_thresholds"] else 250.0
+    st.session_state["tier_thresholds"].append(last_thr)
+while len(st.session_state["tier_discounts"]) < tier_count:
+    st.session_state["tier_discounts"].append(0.0)
+if len(st.session_state["tier_thresholds"]) > tier_count:
+    st.session_state["tier_thresholds"] = st.session_state["tier_thresholds"][: tier_count]
+if len(st.session_state["tier_discounts"]) > tier_count:
+    st.session_state["tier_discounts"] = st.session_state["tier_discounts"][: tier_count]
+
+# Build an interactive table for tiers
+tier_rows = []
+for i in range(int(tier_count)):
+    tier_rows.append(
+        {
+            "Tier": i + 1,
+            "Max SQM": float(st.session_state["tier_thresholds"][i]),
+            "% vs base": float(st.session_state["tier_discounts"][i]),
+        }
     )
 
-    tier_count = st.number_input(
-        "Number of SQM tiers",
-        min_value=1,
-        max_value=6,
-        step=1,
-        value=st.session_state["tier_count"],
-        key="tier_count_input",
-    )
-    st.session_state["tier_count"] = int(tier_count)
+tier_df = pd.DataFrame(tier_rows)
 
-    # Ensure lists match tier_count
-    while len(st.session_state["tier_thresholds"]) < tier_count:
-        last_thr = st.session_state["tier_thresholds"][-1] if st.session_state["tier_thresholds"] else 250.0
-        st.session_state["tier_thresholds"].append(last_thr)
-    while len(st.session_state["tier_discounts"]) < tier_count:
-        st.session_state["tier_discounts"].append(0.0)
-    if len(st.session_state["tier_thresholds"]) > tier_count:
-        st.session_state["tier_thresholds"] = st.session_state["tier_thresholds"][:tier_count]
-    if len(st.session_state["tier_discounts"]) > tier_count:
-        st.session_state["tier_discounts"] = st.session_state["tier_discounts"][:tier_count]
+st.write("Configure tiers (edit cells below):")
+edited_tier_df = st.data_editor(
+    tier_df,
+    num_rows="fixed",
+    use_container_width=True,
+    disabled=["Tier"],
+    key="tier_editor",
+)
 
-    tier_thresholds = []
-    tier_discounts = []
-    for i in range(int(tier_count)):
-        c1, c2, c3 = st.columns([1, 1, 2])
-        with c1:
-            thr = st.number_input(
-                f"Tier {i+1} – up to SQM",
-                min_value=0.0,
-                value=float(st.session_state["tier_thresholds"][i]),
-                step=1.0,
-                key=f"tier_thr_{i}",
-            )
-        with c2:
-            disc = st.number_input(
-                f"% vs base",
-                help="Negative for discount, positive for surcharge",
-                value=float(st.session_state["tier_discounts"][i]),
-                step=0.1,
-                format="%.1f",
-                key=f"tier_disc_{i}",
-            )
-        with c3:
-            st.write("")
+# Push edited values back into session_state
+tier_thresholds = []
+tier_discounts = []
+for _, r in edited_tier_df.iterrows():
+    # force non-negative thresholds
+    max_sqm = float(r["Max SQM"]) if not pd.isna(r["Max SQM"]) else 0.0
+    if max_sqm < 0:
+        max_sqm = 0.0
+    tier_thresholds.append(max_sqm)
+    tier_discounts.append(float(r["% vs base"]) if not pd.isna(r["% vs base"]) else 0.0)
 
-        tier_thresholds.append(float(thr))
-        tier_discounts.append(float(disc))
+st.session_state["tier_thresholds"] = tier_thresholds
+st.session_state["tier_discounts"] = tier_discounts
 
-    st.session_state["tier_thresholds"] = tier_thresholds
-    st.session_state["tier_discounts"] = tier_discounts
+# Sort tiers by threshold so ranges are consistent
+tiers_sorted = sorted(zip(tier_thresholds, tier_discounts), key=lambda x: x[0])
+sorted_thresholds = [t[0] for t in tiers_sorted]
+sorted_discounts = [t[1] for t in tiers_sorted]
 
-    # Sort tiers by threshold
-    tiers_sorted = sorted(zip(tier_thresholds, tier_discounts), key=lambda x: x[0])
-    sorted_thresholds = [t[0] for t in tiers_sorted]
-    sorted_discounts = [t[1] for t in tiers_sorted]
+def pick_discount_for_sqm(sqm):
+    if pd.isna(sqm) or not sorted_thresholds:
+        return 0.0
+    for T, D in zip(sorted_thresholds, sorted_discounts):
+        if sqm <= T:
+            return D
+    return sorted_discounts[-1]  # use last tier for > max
 
-    def pick_discount_for_sqm(sqm):
-        if pd.isna(sqm):
-            return 0.0
-        for T, D in zip(sorted_thresholds, sorted_discounts):
-            if sqm <= T:
-                return D
-        return sorted_discounts[-1]  # use last tier for > max
+# Determine volume discount per row based on SQM per annum (fallback to SQM per run)
+volume_discounts = []
+tier_prices = []
+for _, row in calc_with_price.iterrows():
+    base = row["Base Price per SQM (AUD)"]
+    material = row.get("Material")
+    if pd.isna(base):
+        volume_discounts.append(0.0)
+        tier_prices.append(np.nan)
+        continue
 
-    # Determine volume discount per row based on SQM per annum (fallback to SQM per run)
-    volume_discounts = []
-    tier_prices = []
-    for _, row in calc_with_price.iterrows():
-        base = row["Base Price per SQM (AUD)"]
-        material = row.get("Material")
-        if pd.isna(base):
-            volume_discounts.append(0.0)
-            tier_prices.append(np.nan)
-            continue
+    group = group_assignment_map.get(material)
+    use_tiers = group_volume_flags.get(group, True)
 
-        group = group_assignment_map.get(material)
-        use_tiers = group_volume_flags.get(group, True)
+    if not use_tiers:
+        disc = 0.0
+        tier_price = base
+    else:
+        sqm_metric = row.get("SQM per annum")
+        if pd.isna(sqm_metric):
+            sqm_metric = row.get("SQM per run")
+        disc = pick_discount_for_sqm(sqm_metric)
+        tier_price = base * (1.0 + disc / 100.0)
 
-        if not use_tiers:
-            disc = 0.0
-            tier_price = base
-        else:
-            sqm_metric = row.get("SQM per annum")
-            if pd.isna(sqm_metric):
-                sqm_metric = row.get("SQM per run")
-            disc = pick_discount_for_sqm(sqm_metric)
-            tier_price = base * (1.0 + disc / 100.0)
+    volume_discounts.append(disc)
+    tier_prices.append(tier_price)
 
-        volume_discounts.append(disc)
-        tier_prices.append(tier_price)
-
-    calc_with_price["Volume Discount %"] = volume_discounts
-    calc_with_price["Tier Price per SQM (AUD)"] = tier_prices
+calc_with_price["Volume Discount %"] = volume_discounts
+calc_with_price["Tier Price per SQM (AUD)"] = tier_prices
 
     # Apply DS loading to get effective price (AUD)
     ds_factor = 1.0 + st.session_state["double_sided_loading_percent"] / 100.0
